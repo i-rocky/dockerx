@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.goos }} ${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+            archive_ext: .zip
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+            archive_ext: .tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+            archive_ext: .tar.gz
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive_ext: .tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive_ext: .tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build archive
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          EXT: ${{ matrix.ext }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME}"
+          case "${GOARCH}" in
+            amd64) ARCH_NAME="x86_64" ;;
+            arm64) ARCH_NAME="aarch64" ;;
+            *) echo "unsupported architecture: ${GOARCH}" >&2; exit 1 ;;
+          esac
+
+          BASENAME="dockerx-${GOOS}-${ARCH_NAME}-${VERSION}"
+          BIN="dockerx${EXT}"
+
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
+            go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${BIN}" .
+
+          if [[ "${GOOS}" == "windows" ]]; then
+            (cd dist && zip -9 "${BASENAME}.zip" "${BIN}")
+            mv "dist/${BASENAME}.zip" .
+          else
+            tar -C dist -czf "${BASENAME}.tar.gz" "${BIN}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dockerx-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dockerx-*.zip
+            dockerx-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NO_V="${VERSION#v}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          WIN_FILE="$(find dist -type f -name "dockerx-windows-x86_64-${VERSION}.zip" | head -n1)"
+          DARWIN_AMD64="$(find dist -type f -name "dockerx-darwin-x86_64-${VERSION}.tar.gz" | head -n1)"
+          DARWIN_ARM64="$(find dist -type f -name "dockerx-darwin-aarch64-${VERSION}.tar.gz" | head -n1)"
+          LINUX_AMD64="$(find dist -type f -name "dockerx-linux-x86_64-${VERSION}.tar.gz" | head -n1)"
+          LINUX_ARM64="$(find dist -type f -name "dockerx-linux-aarch64-${VERSION}.tar.gz" | head -n1)"
+
+          for file in "$WIN_FILE" "$DARWIN_AMD64" "$DARWIN_ARM64" "$LINUX_AMD64" "$LINUX_ARM64"; do
+            if [[ -z "${file}" ]]; then
+              echo "missing release artifact" >&2
+              exit 1
+            fi
+            cp "${file}" dist/
+          done
+
+          (cd dist && find . -maxdepth 1 -type f \( -name "*.zip" -o -name "*.tar.gz" \) -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+
+          WIN_SHA="$(sha256sum "dist/$(basename "$WIN_FILE")" | awk '{print $1}')"
+          DARWIN_AMD64_SHA="$(sha256sum "dist/$(basename "$DARWIN_AMD64")" | awk '{print $1}')"
+          DARWIN_ARM64_SHA="$(sha256sum "dist/$(basename "$DARWIN_ARM64")" | awk '{print $1}')"
+          LINUX_AMD64_SHA="$(sha256sum "dist/$(basename "$LINUX_AMD64")" | awk '{print $1}')"
+          LINUX_ARM64_SHA="$(sha256sum "dist/$(basename "$LINUX_ARM64")" | awk '{print $1}')"
+
+          sed \
+            -e "s#__REPO__#${REPO}#g" \
+            -e "s#__VERSION__#${VERSION_NO_V}#g" \
+            -e "s#__SHA256__#${WIN_SHA}#g" \
+            packaging/scoop/dockerx.json > dist/scoop-dockerx.json
+
+          sed \
+            -e "s#__REPO__#${REPO}#g" \
+            -e "s#__VERSION__#${VERSION_NO_V}#g" \
+            -e "s#__DARWIN_AMD64_SHA__#${DARWIN_AMD64_SHA}#g" \
+            -e "s#__DARWIN_ARM64_SHA__#${DARWIN_ARM64_SHA}#g" \
+            -e "s#__LINUX_AMD64_SHA__#${LINUX_AMD64_SHA}#g" \
+            -e "s#__LINUX_ARM64_SHA__#${LINUX_ARM64_SHA}#g" \
+            packaging/homebrew/dockerx.rb > dist/dockerx.rb
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+            dist/scoop-dockerx.json
+            dist/dockerx.rb
+
+      - name: Update Homebrew tap
+        if: ${{ secrets.HOMEBREW_TAP_PAT != '' && secrets.HOMEBREW_TAP_REPO != '' }}
+        shell: bash
+        env:
+          HOMEBREW_TAP_PAT: ${{ secrets.HOMEBREW_TAP_PAT }}
+          HOMEBREW_TAP_REPO: ${{ secrets.HOMEBREW_TAP_REPO }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_PAT}@github.com/${HOMEBREW_TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp dist/dockerx.rb tap/Formula/dockerx.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No tap changes"
+            exit 0
+          fi
+          git add Formula/dockerx.rb
+          git commit -m "dockerx ${VERSION}"
+          git push
+
+      - name: Notify Scoop bucket
+        if: ${{ secrets.BUCKET_PAT != '' && vars.BUCKET_REPO != '' }}
+        shell: bash
+        env:
+          BUCKET_PAT: ${{ secrets.BUCKET_PAT }}
+          BUCKET_REPO: ${{ vars.BUCKET_REPO }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -X POST \
+            -H "Authorization: token ${BUCKET_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: dockerx-release" \
+            "https://api.github.com/repos/${BUCKET_REPO}/dispatches" \
+            -d '{"event_type":"checkver"}'

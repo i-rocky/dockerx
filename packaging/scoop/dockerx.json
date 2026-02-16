@@ -1,0 +1,17 @@
+{
+  "version": "__VERSION__",
+  "description": "Hardened Docker dev environment launcher",
+  "homepage": "https://github.com/__REPO__",
+  "license": "MIT",
+  "url": "https://github.com/__REPO__/releases/download/v__VERSION__/dockerx-windows-x86_64-v__VERSION__.zip",
+  "hash": "__SHA256__",
+  "bin": "dockerx.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "url": "https://github.com/__REPO__/releases/download/v$version/dockerx-windows-x86_64-v$version.zip",
+    "hash": {
+      "url": "https://github.com/__REPO__/releases/download/v$version/SHA256SUMS.txt",
+      "regex": "$sha256\\s+dockerx-windows-x86_64-v$version\\.zip"
+    }
+  }
+}
