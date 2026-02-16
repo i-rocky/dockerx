@@ -7,6 +7,27 @@
 - Host config paths (`codex`, `gh`, `git`, `huggingface`, `.ssh`) are auto-mounted read-only when present.
 - The goal is host safety: strong container access with minimal host write surface.
 
+## Installation
+
+### Windows (Scoop)
+
+```powershell
+scoop bucket add rocky https://github.com/i-rocky/scoop-bucket
+scoop install dockerx
+```
+
+### macOS/Linux (Homebrew)
+
+```sh
+brew tap i-rocky/tap
+brew install dockerx
+```
+
+### Manual (GitHub Releases)
+
+Download the platform archive from the latest release, extract it, and put
+`dockerx` on your `PATH`.
+
 ## Quick start
 
 ```sh
@@ -47,7 +68,6 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o dockerx.exe .
 Release tags (`v*`) build platform artifacts and publish:
 
 - Windows zip for Scoop
-- macOS/Linux tarballs and checksums for Homebrew tap formulas
-- generated `scoop-dockerx.json` and `dockerx.rb` release assets
+- macOS/Linux tarballs and checksums for Homebrew formulas
 
-See `.github/workflows/release.yml` and files in `packaging/`.
+See `.github/workflows/release.yml`.
