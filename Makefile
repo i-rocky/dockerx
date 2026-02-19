@@ -5,6 +5,9 @@ GO ?= go
 build:
 	docker build -t $(IMAGE):$(VERSION) .
 
+build-test-image:
+	docker build -t $(IMAGE):test .
+
 UID ?= $(shell id -u)
 GID ?= $(shell id -g)
 
@@ -25,7 +28,10 @@ test:
 build-cli:
 	CGO_ENABLED=0 $(GO) build -o dockerx .
 
+cli: build-cli build-test-image
+	./dockerx --image $(IMAGE):test
+
 build-win:
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -ldflags "-X main.version=$(VERSION)" -o dockerx.exe .
 
-.PHONY: build run publish launch test build-cli build-win
+.PHONY: build build-test-image run publish launch test build-cli cli build-win

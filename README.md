@@ -2,9 +2,9 @@
 
 `dockerx` launches a hardened dev container in your current directory:
 
-- Your current directory is mounted at `/w` as read-write.
+- Your current directory is mounted at `/app` as read-write.
 - The container root filesystem is read-only.
-- Host config paths (`codex`, `gh`, `git`, `huggingface`, `.ssh`) are auto-mounted read-only when present.
+- Host config paths are bind-mounted read-only under `/tmp`, copied into `~/...` on startup, and diffed on exit.
 - The goal is host safety: strong container access with minimal host write surface.
 
 ## Installation
@@ -51,9 +51,8 @@ dockerx --image wpkpda/dockerx:latest
 
 - `--read-only`
 - `--cap-drop ALL`
-- `--security-opt no-new-privileges`
-- `/w` bind-mounted read-write
-- config mounts bind-mounted read-only
+- `/app` bind-mounted read-write
+- config mounts bind-mounted read-only under `/tmp`, then copied into home paths
 - tmpfs mounts for `/tmp`, `/run`, `/var/tmp`, and container home
 
 ## Build

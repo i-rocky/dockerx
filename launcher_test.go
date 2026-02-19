@@ -48,12 +48,10 @@ func TestBuildDockerArgsIncludesSecurityDefaults(t *testing.T) {
 	for _, required := range []string{
 		"run",
 		"--read-only",
-		"--security-opt",
-		"no-new-privileges",
 		"--cap-drop",
 		"ALL",
 		"--workdir",
-		"/w",
+		"/app",
 		"repo/image:latest",
 		"zsh",
 	} {
@@ -66,8 +64,38 @@ func TestBuildDockerArgsIncludesSecurityDefaults(t *testing.T) {
 	if !slices.Contains(args, wantWorkMount) {
 		t.Fatalf("expected %q in args", wantWorkMount)
 	}
-	if !containsSubstring(args, "type=bind,src=/tmp/work,dst=/w") {
-		t.Fatalf("missing /w mount in args: %v", args)
+	if containsSubstring(args, "no-new-privileges") {
+		t.Fatalf("did not expect no-new-privileges in args: %v", args)
+	}
+	if !containsSubstring(args, "type=bind,src=/tmp/work,dst=/app") {
+		t.Fatalf("missing /app mount in args: %v", args)
+	}
+}
+
+func TestBuildDockerArgsStagesConfigMounts(t *testing.T) {
+	configMounts := []mountSpec{
+		{src: "/host/.codex", dst: containerHome + "/.codex", readOnly: true},
+	}
+
+	args, _, err := buildDockerArgs("repo/image:latest", "/tmp/work", []string{"zsh"}, configMounts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !containsSubstring(args, "type=bind,src=/host/.codex,dst=/tmp/dockerx-config/0,readonly") {
+		t.Fatalf("missing staged read-only mount: %v", args)
+	}
+	if !slices.Contains(args, "--env") {
+		t.Fatalf("expected --env entries: %v", args)
+	}
+	if !containsSubstring(args, "DOCKERX_CONFIG_SRC_0=/tmp/dockerx-config/0") {
+		t.Fatalf("missing DOCKERX_CONFIG_SRC_0 env: %v", args)
+	}
+	if !containsSubstring(args, "DOCKERX_CONFIG_DST_0="+containerHome+"/.codex") {
+		t.Fatalf("missing DOCKERX_CONFIG_DST_0 env: %v", args)
+	}
+	if !containsSubstring(args, "DOCKERX_CONFIG_COUNT=1") {
+		t.Fatalf("missing DOCKERX_CONFIG_COUNT env: %v", args)
 	}
 }
 

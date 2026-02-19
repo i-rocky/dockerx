@@ -16,6 +16,7 @@ import (
 )
 
 const containerHome = "/home/dev"
+const configStageRoot = "/tmp/dockerx-config"
 
 type cliConfig struct {
 	image       string
@@ -100,14 +101,13 @@ func buildDockerArgs(image, workDir string, command []string, configMounts []mou
 
 	args = append(args,
 		"--read-only",
-		"--security-opt", "no-new-privileges",
 		"--cap-drop", "ALL",
-		"--mount", formatMount(mountSpec{src: workDir, dst: "/w", readOnly: false}),
+		"--mount", formatMount(mountSpec{src: workDir, dst: "/app", readOnly: false}),
 		"--tmpfs", "/tmp:mode=1777",
 		"--tmpfs", "/run:mode=755",
 		"--tmpfs", "/var/tmp:mode=1777",
 		"--tmpfs", containerHome+":mode=755",
-		"--workdir", "/w",
+		"--workdir", "/app",
 		"--env", "HOME="+containerHome,
 		"--env", "USER=dev",
 		"--env", "CODEX_HOME="+containerHome+"/.codex",
@@ -117,11 +117,17 @@ func buildDockerArgs(image, workDir string, command []string, configMounts []mou
 		args = append(args, "--user", uidGID)
 	}
 
-	for _, m := range configMounts {
+	for i, m := range configMounts {
 		if strings.Contains(m.src, ",") {
 			return nil, nil, fmt.Errorf("mount source contains an unsupported comma: %q", m.src)
 		}
-		args = append(args, "--mount", formatMount(m))
+		stagePath := fmt.Sprintf("%s/%d", configStageRoot, i)
+		args = append(args, "--mount", formatMount(mountSpec{src: m.src, dst: stagePath, readOnly: true}))
+		args = append(args, "--env", fmt.Sprintf("DOCKERX_CONFIG_SRC_%d=%s", i, stagePath))
+		args = append(args, "--env", fmt.Sprintf("DOCKERX_CONFIG_DST_%d=%s", i, m.dst))
+	}
+	if len(configMounts) > 0 {
+		args = append(args, "--env", fmt.Sprintf("DOCKERX_CONFIG_COUNT=%d", len(configMounts)))
 	}
 
 	envKeys := gatherPassthroughEnvKeys()
@@ -136,17 +142,14 @@ func buildDockerArgs(image, workDir string, command []string, configMounts []mou
 
 func printPlan(image, workDir string, command []string, configMounts []mountSpec, envKeys, args []string) {
 	fmt.Printf("Image: %s\n", image)
-	fmt.Printf("Workdir: %s -> /w (rw)\n", workDir)
+	fmt.Printf("Workdir: %s -> /app (rw)\n", workDir)
 	if len(configMounts) == 0 {
 		fmt.Println("Host config mounts: none")
 	} else {
 		fmt.Println("Host config mounts:")
-		for _, m := range configMounts {
-			mode := "rw"
-			if m.readOnly {
-				mode = "ro"
-			}
-			fmt.Printf("  - %s -> %s (%s)\n", m.src, m.dst, mode)
+		for i, m := range configMounts {
+			stagePath := fmt.Sprintf("%s/%d", configStageRoot, i)
+			fmt.Printf("  - %s -> %s (ro), copied to %s (rw)\n", m.src, stagePath, m.dst)
 		}
 	}
 	if len(envKeys) == 0 {
