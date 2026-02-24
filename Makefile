@@ -29,7 +29,7 @@ build-cli:
 	CGO_ENABLED=0 $(GO) build -o dockerx .
 
 cli: build-cli build-test-image
-	./dockerx --image $(IMAGE):test
+	./dockerx --image $(IMAGE):test --no-pull
 
 build-win:
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -ldflags "-X main.version=$(VERSION)" -o dockerx.exe .

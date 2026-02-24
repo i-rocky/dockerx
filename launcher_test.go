@@ -40,7 +40,7 @@ func TestDiscoverHostConfigMounts(t *testing.T) {
 }
 
 func TestBuildDockerArgsIncludesSecurityDefaults(t *testing.T) {
-	args, _, err := buildDockerArgs("repo/image:latest", "/tmp/work", []string{"zsh"}, nil)
+	args, _, err := buildDockerArgs("repo/image:latest", "/tmp/work", []string{"zsh"}, nil, nil, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,12 +72,42 @@ func TestBuildDockerArgsIncludesSecurityDefaults(t *testing.T) {
 	}
 }
 
+func TestBuildDockerArgsPullAlwaysForDockerxImage(t *testing.T) {
+	args, _, err := buildDockerArgs("wpkpda/dockerx:latest", "/tmp/work", []string{"zsh"}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsPair(args, "--pull", "always") {
+		t.Fatalf("expected --pull always in args: %v", args)
+	}
+}
+
+func TestBuildDockerArgsDoesNotForcePullForOtherImages(t *testing.T) {
+	args, _, err := buildDockerArgs("repo/image:latest", "/tmp/work", []string{"zsh"}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if containsPair(args, "--pull", "always") {
+		t.Fatalf("did not expect --pull always in args: %v", args)
+	}
+}
+
+func TestBuildDockerArgsNoPullSkipsAlwaysPolicy(t *testing.T) {
+	args, _, err := buildDockerArgs("wpkpda/dockerx:latest", "/tmp/work", []string{"zsh"}, nil, nil, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if containsPair(args, "--pull", "always") {
+		t.Fatalf("did not expect --pull always in args with no-pull: %v", args)
+	}
+}
+
 func TestBuildDockerArgsStagesConfigMounts(t *testing.T) {
 	configMounts := []mountSpec{
 		{src: "/host/.codex", dst: containerHome + "/.codex", readOnly: true},
 	}
 
-	args, _, err := buildDockerArgs("repo/image:latest", "/tmp/work", []string{"zsh"}, configMounts)
+	args, _, err := buildDockerArgs("repo/image:latest", "/tmp/work", []string{"zsh"}, configMounts, nil, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,7 +130,7 @@ func TestBuildDockerArgsStagesConfigMounts(t *testing.T) {
 }
 
 func TestBuildDockerArgsRejectsCommaInWorkdir(t *testing.T) {
-	_, _, err := buildDockerArgs("repo/image:latest", "/tmp/bad,path", []string{"zsh"}, nil)
+	_, _, err := buildDockerArgs("repo/image:latest", "/tmp/bad,path", []string{"zsh"}, nil, nil, false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -126,6 +156,43 @@ func TestGatherPassthroughEnvKeys(t *testing.T) {
 	}
 }
 
+func TestEnsureRuntimeIdentityAddsMissingEntries(t *testing.T) {
+	passwdBase := "root:x:0:0:root:/root:/bin/bash\n"
+	groupBase := "root:x:0:\n"
+	shadowBase := "root:*:19793:0:99999:7:::\n"
+
+	passwdOut, groupOut, shadowOut := ensureRuntimeIdentity(passwdBase, groupBase, shadowBase, "dev", "/home/dev", 501, 20)
+	if !strings.Contains(passwdOut, "dev:x:501:20:dev user:/home/dev:/bin/zsh") {
+		t.Fatalf("missing runtime passwd entry: %s", passwdOut)
+	}
+	if !strings.Contains(groupOut, "dev:x:20:") {
+		t.Fatalf("missing runtime group entry: %s", groupOut)
+	}
+	if !strings.Contains(shadowOut, "dev::19793:0:99999:7:::") {
+		t.Fatalf("missing runtime shadow entry: %s", shadowOut)
+	}
+}
+
+func TestEnsureRuntimeIdentityUsesExistingUIDUser(t *testing.T) {
+	passwdBase := "root:x:0:0:root:/root:/bin/bash\nrocky:x:501:20:Rocky:/home/rocky:/bin/zsh\n"
+	groupBase := "root:x:0:\nstaff:x:20:\n"
+	shadowBase := "root:*:19793:0:99999:7:::\nrocky:*:19793:0:99999:7:::\n"
+
+	passwdOut, groupOut, shadowOut := ensureRuntimeIdentity(passwdBase, groupBase, shadowBase, "dev", "/home/dev", 501, 20)
+	if strings.Contains(passwdOut, "dev:x:501:20:") {
+		t.Fatalf("did not expect duplicate dev entry: %s", passwdOut)
+	}
+	if strings.Count(passwdOut, "rocky:x:501:20:") != 1 {
+		t.Fatalf("expected existing rocky entry once: %s", passwdOut)
+	}
+	if strings.Count(groupOut, "staff:x:20:") != 1 {
+		t.Fatalf("expected existing gid entry once: %s", groupOut)
+	}
+	if strings.Count(shadowOut, "rocky:*:19793:0:99999:7:::") != 1 {
+		t.Fatalf("expected existing shadow entry once: %s", shadowOut)
+	}
+}
+
 func assertMount(t *testing.T, mounts []mountSpec, src, dst string, readOnly bool) {
 	t.Helper()
 	absSrc, err := filepath.Abs(src)
@@ -144,6 +211,15 @@ func assertMount(t *testing.T, mounts []mountSpec, src, dst string, readOnly boo
 func containsSubstring(values []string, part string) bool {
 	for _, v := range values {
 		if strings.Contains(v, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPair(values []string, first, second string) bool {
+	for i := 0; i+1 < len(values); i++ {
+		if values[i] == first && values[i+1] == second {
 			return true
 		}
 	}

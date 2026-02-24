@@ -39,6 +39,7 @@ dockerx --image wpkpda/dockerx:latest
 ## CLI flags
 
 - `--image`: container image (default `wpkpda/dockerx:latest` or `DOCKERX_IMAGE`)
+- `--no-pull`: disable forced `--pull always` for `wpkpda/dockerx` images (useful for local `:test` tags)
 - `--shell`: shell when no command is provided (default `zsh`)
 - `--no-config`: disable automatic host config mounts
 - `--dry-run`: print docker command without running it
@@ -50,10 +51,11 @@ dockerx --image wpkpda/dockerx:latest
 `dockerx` starts the container with:
 
 - `--read-only`
-- `--cap-drop ALL`
+- `--cap-drop ALL` with minimal adds: `SETUID`, `SETGID`, `AUDIT_WRITE` (to support `sudo`)
 - `/app` bind-mounted read-write
 - config mounts bind-mounted read-only under `/tmp`, then copied into home paths
-- tmpfs mounts for `/tmp`, `/run`, `/var/tmp`, and container home
+- runtime identity overlays for `/etc/passwd`, `/etc/group`, `/etc/shadow` so host-mapped UID/GID is resolvable by setuid tools like `sudo`
+- tmpfs mounts for `/tmp`, `/run`, `/var/tmp`, `/var/lib/apt/lists`, `/var/cache/apt`, and container home
 
 ## Build
 

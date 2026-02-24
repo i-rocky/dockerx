@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ const configStageRoot = "/tmp/dockerx-config"
 type cliConfig struct {
 	image       string
 	shell       string
+	noPull      bool
 	noConfig    bool
 	dryRun      bool
 	verbose     bool
@@ -61,12 +63,29 @@ func launchDockerx(cfg cliConfig) error {
 		configMounts = discoverHostConfigMounts(homeDir, getenv, pathExists)
 	}
 
+	identityMounts := []mountSpec{}
+	cleanupIdentity := func() {}
+	defer cleanupIdentity()
+	if !cfg.dryRun {
+		if uidGID, ok := hostUIDGID(); ok {
+			mounts, cleanup, err := prepareIdentityMounts(cfg.image, "dev", containerHome, uidGID)
+			if err != nil {
+				if cfg.verbose {
+					fmt.Fprintf(os.Stderr, "warning: identity overlay disabled: %v\n", err)
+				}
+			} else {
+				identityMounts = mounts
+				cleanupIdentity = cleanup
+			}
+		}
+	}
+
 	command := cfg.command
 	if len(command) == 0 {
 		command = []string{cfg.shell}
 	}
 
-	args, envKeys, err := buildDockerArgs(cfg.image, workDir, command, configMounts)
+	args, envKeys, err := buildDockerArgs(cfg.image, workDir, command, configMounts, identityMounts, cfg.noPull)
 	if err != nil {
 		return err
 	}
@@ -89,12 +108,25 @@ func launchDockerx(cfg cliConfig) error {
 	return nil
 }
 
-func buildDockerArgs(image, workDir string, command []string, configMounts []mountSpec) ([]string, []string, error) {
+func buildDockerArgs(image, workDir string, command []string, configMounts, identityMounts []mountSpec, noPull bool) ([]string, []string, error) {
 	if strings.Contains(workDir, ",") {
 		return nil, nil, fmt.Errorf("current directory contains an unsupported comma: %q", workDir)
 	}
 
+	uidGID, hasUIDGID := hostUIDGID()
+
+	containerHomeTmpfs := containerHome + ":mode=755"
+	if hasUIDGID {
+		parts := strings.SplitN(uidGID, ":", 2)
+		if len(parts) == 2 {
+			containerHomeTmpfs = fmt.Sprintf("%s:mode=755,uid=%s,gid=%s", containerHome, parts[0], parts[1])
+		}
+	}
+
 	args := []string{"run", "--rm", "-i"}
+	if !noPull && shouldAlwaysPull(image) {
+		args = append(args, "--pull", "always")
+	}
 	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
 		args = append(args, "-t")
 	}
@@ -102,19 +134,31 @@ func buildDockerArgs(image, workDir string, command []string, configMounts []mou
 	args = append(args,
 		"--read-only",
 		"--cap-drop", "ALL",
+		"--cap-add", "SETUID",
+		"--cap-add", "SETGID",
+		"--cap-add", "AUDIT_WRITE",
 		"--mount", formatMount(mountSpec{src: workDir, dst: "/app", readOnly: false}),
 		"--tmpfs", "/tmp:mode=1777",
 		"--tmpfs", "/run:mode=755",
 		"--tmpfs", "/var/tmp:mode=1777",
-		"--tmpfs", containerHome+":mode=755",
+		"--tmpfs", "/var/lib/apt/lists:mode=755",
+		"--tmpfs", "/var/cache/apt:mode=755",
+		"--tmpfs", containerHomeTmpfs,
 		"--workdir", "/app",
 		"--env", "HOME="+containerHome,
 		"--env", "USER=dev",
 		"--env", "CODEX_HOME="+containerHome+"/.codex",
 	)
 
-	if uidGID, ok := hostUIDGID(); ok {
+	if hasUIDGID {
 		args = append(args, "--user", uidGID)
+	}
+
+	for _, m := range identityMounts {
+		if strings.Contains(m.src, ",") {
+			return nil, nil, fmt.Errorf("mount source contains an unsupported comma: %q", m.src)
+		}
+		args = append(args, "--mount", formatMount(m))
 	}
 
 	for i, m := range configMounts {
@@ -138,6 +182,168 @@ func buildDockerArgs(image, workDir string, command []string, configMounts []mou
 	args = append(args, image)
 	args = append(args, command...)
 	return args, envKeys, nil
+}
+
+func shouldAlwaysPull(image string) bool {
+	ref := strings.TrimSpace(strings.ToLower(image))
+	ref = strings.TrimPrefix(ref, "docker.io/")
+	ref = strings.TrimPrefix(ref, "index.docker.io/")
+	return ref == "wpkpda/dockerx" || strings.HasPrefix(ref, "wpkpda/dockerx:")
+}
+
+func prepareIdentityMounts(image, username, home, uidGID string) ([]mountSpec, func(), error) {
+	parts := strings.SplitN(uidGID, ":", 2)
+	if len(parts) != 2 {
+		return nil, nil, fmt.Errorf("invalid uid:gid: %q", uidGID)
+	}
+	uid, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid uid in %q: %w", uidGID, err)
+	}
+	gid, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid gid in %q: %w", uidGID, err)
+	}
+	if uid == 0 {
+		return nil, func() {}, nil
+	}
+
+	passwdBase, err := readImageFile(image, "/etc/passwd")
+	if err != nil {
+		return nil, nil, err
+	}
+	groupBase, err := readImageFile(image, "/etc/group")
+	if err != nil {
+		return nil, nil, err
+	}
+	shadowBase, err := readImageFile(image, "/etc/shadow")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	passwdContent, groupContent, shadowContent := ensureRuntimeIdentity(passwdBase, groupBase, shadowBase, username, home, uid, gid)
+
+	tmpDir, err := os.MkdirTemp("", "dockerx-identity-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create identity temp dir: %w", err)
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(tmpDir)
+	}
+
+	passwdPath := filepath.Join(tmpDir, "passwd")
+	groupPath := filepath.Join(tmpDir, "group")
+	shadowPath := filepath.Join(tmpDir, "shadow")
+	if err := os.WriteFile(passwdPath, []byte(passwdContent), 0o644); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("write passwd overlay: %w", err)
+	}
+	if err := os.WriteFile(groupPath, []byte(groupContent), 0o644); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("write group overlay: %w", err)
+	}
+	if err := os.WriteFile(shadowPath, []byte(shadowContent), 0o400); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("write shadow overlay: %w", err)
+	}
+
+	return []mountSpec{
+		{src: passwdPath, dst: "/etc/passwd", readOnly: true},
+		{src: groupPath, dst: "/etc/group", readOnly: true},
+		{src: shadowPath, dst: "/etc/shadow", readOnly: true},
+	}, cleanup, nil
+}
+
+func readImageFile(image, path string) (string, error) {
+	cmd := exec.Command("docker", "run", "--rm", "--entrypoint", "cat", image, path)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("read %s from image %s: %w (%s)", path, image, err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+func ensureRuntimeIdentity(passwdBase, groupBase, shadowBase, username, home string, uid, gid int) (string, string, string) {
+	if strings.TrimSpace(username) == "" {
+		username = "dev"
+	}
+
+	passwdLines := splitLines(passwdBase)
+	groupLines := splitLines(groupBase)
+	shadowLines := splitLines(shadowBase)
+	uidText := strconv.Itoa(uid)
+	gidText := strconv.Itoa(gid)
+
+	runtimeUser := username
+	hasUID := false
+	for _, line := range passwdLines {
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		if fields[2] == uidText {
+			hasUID = true
+			runtimeUser = fields[0]
+			break
+		}
+	}
+	if !hasUID {
+		passwdLines = append(passwdLines, fmt.Sprintf("%s:x:%s:%s:%s user:%s:/bin/zsh", runtimeUser, uidText, gidText, runtimeUser, home))
+	}
+
+	hasGID := false
+	for _, line := range groupLines {
+		fields := strings.Split(line, ":")
+		if len(fields) < 3 {
+			continue
+		}
+		if fields[2] == gidText {
+			hasGID = true
+			break
+		}
+	}
+	if !hasGID {
+		groupLines = append(groupLines, fmt.Sprintf("%s:x:%s:", runtimeUser, gidText))
+	}
+
+	hasShadowUser := false
+	for _, line := range shadowLines {
+		fields := strings.Split(line, ":")
+		if len(fields) < 1 {
+			continue
+		}
+		if fields[0] == runtimeUser {
+			hasShadowUser = true
+			break
+		}
+	}
+	if !hasShadowUser {
+		shadowLines = append(shadowLines, fmt.Sprintf("%s::19793:0:99999:7:::", runtimeUser))
+	}
+
+	return joinLines(passwdLines), joinLines(groupLines), joinLines(shadowLines)
+}
+
+func splitLines(content string) []string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func joinLines(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func printPlan(image, workDir string, command []string, configMounts []mountSpec, envKeys, args []string) {

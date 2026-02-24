@@ -39,6 +39,7 @@ func parseCLI() cliConfig {
 
 	flag.StringVar(&cfg.image, "image", cfg.image, "Docker image to run")
 	flag.StringVar(&cfg.shell, "shell", cfg.shell, "Shell to launch when no command is provided")
+	flag.BoolVar(&cfg.noPull, "no-pull", false, "Disable forced pull policy for dockerx images")
 	flag.BoolVar(&cfg.noConfig, "no-config", false, "Disable automatic host config mounts")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "Print docker command without executing it")
 	flag.BoolVar(&cfg.verbose, "verbose", false, "Print resolved mounts and environment passthrough")
