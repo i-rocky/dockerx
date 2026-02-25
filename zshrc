@@ -10,3 +10,4 @@ ZSH_THEME="powerlevel10k/powerlevel10k"
 [ -f ~/.p10k.zsh ] && source ~/.p10k.zsh
 plugins=(git)
 source "$ZSH/oh-my-zsh.sh"
+alias codex-yolo='codex --dangerously-bypass-approvals-and-sandbox'
